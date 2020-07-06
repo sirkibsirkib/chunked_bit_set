@@ -3,42 +3,54 @@ use core::{
     marker::PhantomData,
 };
 
+/// Provides a predefined set of the standard set-set operations as bit chunk combinators,
+/// for use creating ChunkReadCombined structures
 pub mod combinators;
 
+/// A contiguous machine-word sized storage of bits
 #[derive(Copy, Clone)]
 #[repr(transparent)]
 pub struct Chunk(pub usize);
 
-pub trait BitCollect: Sized {
-    fn from_bit_indices<I: IntoIterator<Item = usize>>(iter: I) -> Self;
+/// Characterizes any owned storage of bits. Allows creation from iterators that either:
+/// 1. visit all set bits
+/// 2. visit all chunks in index order [0*Chunk::BITS, 1*Chunk::BITS, 2*Chunk::BITS, ...]
+/// 3. bisit all bits in index order [0, 1, 2, ...]
+pub trait BitCollect: BitWrite + Default {
+    fn from_chunk_iter<I: IntoIterator<Item = Chunk>>(iter: I) -> Self;
     fn from_bit_iter<I: IntoIterator<Item = bool>>(iter: I) -> Self;
+    fn from_bit_indices<I: IntoIterator<Item = usize>>(iter: I) -> Self;
 }
 
-pub trait BitRead: Sized {
+/// Same functionality as std::convert::{Into, From}, but combined,
+/// and given a new name such that it can be implemented for
+/// upstream types such as Vec without clashing with From/Into.
+pub trait FromIntoChunks: Sized {
+    type Chunks: Sized;
+    fn into_chunks(self) -> Self::Chunks;
+    fn from_chunks(chunks: Self::Chunks) -> Self;
+}
+
+pub type BitSet = Vec<Chunk>;
+
+/// Characterizes any readable storage of Chunks.
+/// Allows for querying, visiting set indices, etc.
+/// Allows random access to indexed chunks, associating every `usize` with some chunk's bit.
+pub trait ChunkRead: Sized {
     fn chunks_len(&self) -> usize;
     fn get_chunk(&self, chunk_index: usize) -> Chunk;
     fn get_bit(&self, bit_index: usize) -> bool;
-    fn iter_set_bits(&self) -> BitSetIter<Self> {
-        BitSetIter {
-            current_chunk_index: 0,
-            chunks_len: self.chunks_len(),
-            next_bit_index: 0,
-            cached_chunk: self.get_chunk(0),
-            bit_read: self,
-        }
+    fn iter_set_bits(&self) -> BitIndexIter<Self> {
+        BitIndexIter::new(self)
     }
     fn count_set_bits(&self) -> usize {
-        let mut count = 0;
-        for chunk_index in 0..self.chunks_len() {
-            count += self.get_chunk(chunk_index).count_ones() as usize;
-        }
-        count
+        chunk_iter(self).map(|chunk| chunk.count_set_bits() as usize).sum()
     }
-    fn combine_with<'a, 'b, C: BitCombinator, B: BitRead>(
+    fn combine_with<'a, 'b, C: ChunkCombinator, B: ChunkRead>(
         &'a self,
         other: &'b B,
-    ) -> BitReadCombined<&'a Self, &'b B, C> {
-        BitReadCombined::new(self, other)
+    ) -> ChunkReadCombined<&'a Self, &'b B, C> {
+        ChunkReadCombined::new(self, other)
     }
     fn to_owned(&self) -> Vec<Chunk> {
         let mut vec = Vec::with_capacity(self.chunks_len());
@@ -48,48 +60,67 @@ pub trait BitRead: Sized {
         vec
     }
 }
+
+/// Characterizes owned, writable storage for indexed bits.
 pub trait BitWrite: Sized {
     fn insert_bit(&mut self, bit_index: usize) -> bool;
     fn remove_bit(&mut self, bit_index: usize) -> bool;
     fn clear(&mut self);
 }
-pub trait BitCombinator {
-    fn combine_chunks_len<A: BitRead, B: BitRead>(a: &A, b: &B) -> usize;
+
+/// Defines functions for combinng chunks of bits.
+/// Default implementation assumes that functions are pure,
+/// and that the index of a bit is independent of its treatment.
+pub trait ChunkCombinator {
+    fn combine_chunks_len<A: ChunkRead, B: ChunkRead>(a: &A, b: &B) -> usize;
     fn combine_chunk(a: Chunk, b: Chunk) -> Chunk;
     fn combine_bit(a: bool, b: bool) -> bool {
         let a = if a { Chunk::FULL } else { Chunk::EMPTY };
         let b = if b { Chunk::FULL } else { Chunk::EMPTY };
         !Self::combine_chunk(a, b).is_empty()
     }
-    fn combine<A: BitRead, B: BitRead>(a: A, b: B) -> BitReadCombined<A, B, Self>
+    fn combine<A: ChunkRead, B: ChunkRead>(a: A, b: B) -> ChunkReadCombined<A, B, Self>
     where
         Self: Sized,
     {
-        BitReadCombined::new(a, b)
+        ChunkReadCombined::new(a, b)
     }
 }
-pub struct BitSetIter<'a, T: BitRead> {
+/// Iterates over some ChunkRead type, emitting indexes of set bits in ascending order.
+pub struct BitIndexIter<'a, T: ChunkRead> {
     current_chunk_index: usize,
     chunks_len: usize,
     next_bit_index: usize,
     cached_chunk: Chunk,
     bit_read: &'a T,
 }
-pub struct BitReadCombined<A: BitRead, B: BitRead, C: BitCombinator> {
+/// A ChunkRead type whose chunks are defined by a combinator, and two inner ChunkRead types.
+/// Used to query and traverse bit sets defined in terms of other bitsets, E.g., union.
+#[derive(Clone, Copy)]
+pub struct ChunkReadCombined<A: ChunkRead, B: ChunkRead, C: ChunkCombinator> {
     c: PhantomData<C>,
     a: A,
     b: B,
-}
-pub trait FromIntoChunks: Sized {
-    type Chunks: Sized;
-    fn into_chunks(self) -> Self::Chunks;
-    fn from_chunks(chunks: Self::Chunks) -> Self;
 }
 struct BitAddress {
     chunk_index: usize,
     index_in_chunk: usize,
 }
 //////////////////////
+impl<'a, T: ChunkRead> BitIndexIter<'a, T> {
+    pub fn new(bit_read: &'a T) -> Self {
+        Self {
+            current_chunk_index: 0,
+            chunks_len: bit_read.chunks_len(),
+            next_bit_index: 0,
+            cached_chunk: bit_read.get_chunk(0),
+            bit_read,
+        }
+    }
+}
+pub fn chunk_iter(cr: impl ChunkRead) -> impl Iterator<Item = Chunk> {
+    (0..cr.chunks_len()).map(move |chunk_index| cr.get_chunk(chunk_index))
+}
 impl FromIntoChunks for Vec<usize> {
     type Chunks = Vec<Chunk>;
     fn into_chunks(self) -> Self::Chunks {
@@ -112,7 +143,7 @@ impl Chunk {
     pub const BITS: usize = std::mem::size_of::<Self>() * 8;
     pub const EMPTY: Self = Chunk(0);
     pub const FULL: Self = Chunk(!0);
-    pub fn count_ones(self) -> u32 {
+    pub fn count_set_bits(self) -> u32 {
         self.0.count_ones()
     }
     pub fn is_empty(self) -> bool {
@@ -163,7 +194,7 @@ impl BitWrite for Vec<Chunk> {
         self.clear();
     }
 }
-impl<'a> BitRead for &'a [Chunk] {
+impl<'a> ChunkRead for &'a [Chunk] {
     fn chunks_len(&self) -> usize {
         self.len()
     }
@@ -175,7 +206,7 @@ impl<'a> BitRead for &'a [Chunk] {
         self.get(chunk_index).copied().map(|chunk| chunk.get_bit(index_in_chunk)).unwrap_or(false)
     }
 }
-impl BitRead for Vec<Chunk> {
+impl ChunkRead for Vec<Chunk> {
     fn chunks_len(&self) -> usize {
         self.as_slice().chunks_len()
     }
@@ -186,23 +217,23 @@ impl BitRead for Vec<Chunk> {
         self.as_slice().get_bit(bit_index)
     }
 }
-impl<A: BitRead, B: BitRead, C: BitCombinator> BitReadCombined<A, B, C> {
+impl<A: ChunkRead, B: ChunkRead, C: ChunkCombinator> ChunkReadCombined<A, B, C> {
     pub fn new(a: A, b: B) -> Self {
-        BitReadCombined { a, b, c: Default::default() }
+        ChunkReadCombined { a, b, c: Default::default() }
     }
 }
-impl<T: BitRead> BitRead for &T {
+impl<T: ChunkRead> ChunkRead for &T {
     fn get_bit(&self, bit_index: usize) -> bool {
-        <T as BitRead>::get_bit(self, bit_index)
+        <T as ChunkRead>::get_bit(self, bit_index)
     }
     fn get_chunk(&self, chunk_index: usize) -> Chunk {
-        <T as BitRead>::get_chunk(self, chunk_index)
+        <T as ChunkRead>::get_chunk(self, chunk_index)
     }
     fn chunks_len(&self) -> usize {
-        <T as BitRead>::chunks_len(self)
+        <T as ChunkRead>::chunks_len(self)
     }
 }
-impl<T: BitRead> Clone for BitSetIter<'_, T> {
+impl<T: ChunkRead> Clone for BitIndexIter<'_, T> {
     fn clone(&self) -> Self {
         Self {
             chunks_len: self.chunks_len,
@@ -213,7 +244,7 @@ impl<T: BitRead> Clone for BitSetIter<'_, T> {
         }
     }
 }
-impl<A: BitRead, B: BitRead, C: BitCombinator> BitRead for BitReadCombined<A, B, C> {
+impl<A: ChunkRead, B: ChunkRead, C: ChunkCombinator> ChunkRead for ChunkReadCombined<A, B, C> {
     fn get_bit(&self, bit_index: usize) -> bool {
         C::combine_bit(self.a.get_bit(bit_index), self.b.get_bit(bit_index))
     }
@@ -230,7 +261,7 @@ impl BitAddress {
         Self { chunk_index: bit_index / Chunk::BITS, index_in_chunk: (bit_index % Chunk::BITS) }
     }
 }
-impl<T: BitRead> Iterator for BitSetIter<'_, T> {
+impl<T: ChunkRead> Iterator for BitIndexIter<'_, T> {
     type Item = usize;
     fn next(&mut self) -> Option<usize> {
         while self.cached_chunk.is_empty() {
@@ -266,7 +297,7 @@ impl<T: BitRead> Iterator for BitSetIter<'_, T> {
         Some(ret)
     }
 }
-impl<T: BitRead> Debug for BitSetIter<'_, T> {
+impl<T: ChunkRead> Debug for BitIndexIter<'_, T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_set().entries(<Self as Clone>::clone(&self)).finish()
     }
@@ -279,12 +310,15 @@ impl BitCollect for Vec<Chunk> {
         }
         vec
     }
+    fn from_chunk_iter<I: IntoIterator<Item = Chunk>>(into_iter: I) -> Self {
+        into_iter.into_iter().collect()
+    }
     fn from_bit_iter<I: IntoIterator<Item = bool>>(into_iter: I) -> Self {
         let mut vec: Vec<Chunk> = Default::default();
         let mut chunk = Chunk::EMPTY;
         let mut bit_index = 0;
         for b in into_iter {
-            if bit_index as usize == Chunk::BITS {
+            if bit_index == Chunk::BITS {
                 vec.push(chunk);
                 bit_index = 0;
                 chunk = Chunk::EMPTY;
@@ -305,32 +339,26 @@ impl Debug for Chunk {
         write!(f, "{:01$b}", self.0, Chunk::BITS)
     }
 }
-impl<A: BitRead, B: BitRead, C: BitCombinator> Debug for BitReadCombined<A, B, C> {
+impl<A: ChunkRead, B: ChunkRead, C: ChunkCombinator> Debug for ChunkReadCombined<A, B, C> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_set().entries(self.iter_set_bits()).finish()
     }
 }
 
-impl<A: BitRead, B: BitRead, C: BitCombinator> Binary for BitReadCombined<A, B, C> {
+impl<A: ChunkRead, B: ChunkRead, C: ChunkCombinator> Binary for ChunkReadCombined<A, B, C> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let chunk_iter = (0..self.chunks_len()).map(|chunk_index| self.get_chunk(chunk_index));
-        f.debug_list().entries(chunk_iter).finish()
+        f.debug_list().entries(chunk_iter(self)).finish()
     }
 }
 
 #[test]
 fn zoop() {
-    let c = &[0b100110, 0b111].into_chunks();
-    println!("{:?}", &c);
-    println!("{:?}", c.iter_set_bits());
-    let mut v = vec![0b0110].into_chunks();
-    v.insert_bit(66);
-    println!("{:?}", &v);
-    println!("{:?}", v.iter_set_bits());
-
-    println!("{:?}", combinators::SymmetricDifference::combine(&c, &v));
-
-    // let q: BitSet = std::iter::repeat(false).take(16).chain(std::iter::once(true)).collect();
-    // println!("{:?}", q);
-    // println!("{:?}", q.iter_set_bits());
+    // let c = &[0b100110, 0b111].into_chunks();
+    // assert_eq!(c.count_set_bits(), 6);
+    let bs = BitSet::from_bit_iter(
+        std::iter::repeat(false)
+            .take(5)
+            .chain([true, false, false].iter().copied().cycle().take(21)),
+    );
+    println!("{:?}", bs);
 }
