@@ -8,7 +8,7 @@ use core::{
 /// for use creating ChunkReadCombined structures
 pub mod combinators;
 
-/// A contiguous machine-word sized storage of bits
+/// A contiguous machine-word sized storage of bits.
 #[derive(Copy, Clone)]
 #[repr(transparent)]
 pub struct Chunk(pub usize);
@@ -18,12 +18,49 @@ pub struct Chunk(pub usize);
 /// 2. visit all chunks in index order [0*Chunk::BITS, 1*Chunk::BITS, 2*Chunk::BITS, ...]
 /// 3. bisit all bits in index order [0, 1, 2, ...]
 pub trait ChunkOwn: ChunkWrite + Default {
+    /// Constructs Self from an iterator over raw chunks whose indices are [0, 1, 2, ...],
+    /// thereby expressing bits with indices [[0, 1, 2, ..., Chunk::BITS-1], ...].
     fn from_chunk_iter<I: IntoIterator<Item = Chunk>>(into_iter: I) -> Self;
-    fn from_bit_iter<I: IntoIterator<Item = bool>>(into_iter: I) -> Self;
+
+    /// Constructs Self from an interator over indices of set bits in no particular ordering.
     fn from_set_bits_iter<I: IntoIterator<Item = usize>>(into_iter: I) -> Self {
         let mut me = Self::default();
         me.extend_from_set_bits_iter(into_iter);
         me
+    }
+
+    /// Constructs Self from an interator over bits with indices [0, 1, 2, ...]
+    fn from_bit_iter<I: IntoIterator<Item = bool>>(into_iter: I) -> Self {
+        struct BitIter<Q: Iterator<Item = bool>> {
+            index_in_chunk: usize,
+            chunk: Chunk,
+            iter: Q,
+        }
+        impl<Q: Iterator<Item = bool>> Iterator for BitIter<Q> {
+            type Item = Chunk;
+            fn next(&mut self) -> Option<Chunk> {
+                while let Some(b) = self.iter.next() {
+                    if b {
+                        self.chunk.insert_bit(self.index_in_chunk);
+                    }
+                    self.index_in_chunk += 1;
+                    if self.index_in_chunk == Chunk::BITS {
+                        self.index_in_chunk = 0;
+                        return Some(std::mem::take(&mut self.chunk));
+                    }
+                }
+                if self.chunk.is_empty() {
+                    None
+                } else {
+                    Some(std::mem::take(&mut self.chunk))
+                }
+            }
+        }
+        Self::from_chunk_iter(BitIter {
+            index_in_chunk: 0,
+            chunk: Chunk::EMPTY,
+            iter: into_iter.into_iter(),
+        })
     }
     fn extend_from_set_bits_iter<I: IntoIterator<Item = usize>>(&mut self, into_iter: I) {
         for bit_index in into_iter {
@@ -41,8 +78,11 @@ pub trait FromIntoChunks: Sized {
     fn from_chunks(chunks: Self::Chunks) -> Self;
 }
 
+/// Convenient alias for owned chunk storage Vec<Chunk>.
 pub type BitSet = Vec<Chunk>;
 
+/// Characterizes a structure that facilitates random read access of indexed chunks of indexed bits.
+/// Allows combinations with other `ChunkRead` types, comparison, querying, and iterating over chunks and set bits.
 pub trait ChunkRead: Sized + Clone {
     fn empty_chunks_start(&self) -> usize; // promises that all chunks in range empty_chunks_start().. will be Chunk::EMPTY
     fn read_chunk(&self, chunk_index: usize) -> Chunk;
@@ -81,7 +121,7 @@ pub trait ChunkRead: Sized + Clone {
     }
 }
 
-/// Characterizes owned, writable storage for indexed bits.
+/// Characterizes a structure that facilitates random write access of indexed chunks of indexed bits.
 pub trait ChunkWrite: Sized + ChunkRead {
     fn insert_bit(&mut self, bit_index: usize) -> bool;
     fn remove_bit(&mut self, bit_index: usize) -> bool;
@@ -118,24 +158,38 @@ pub struct ChunkReadCombined<A: ChunkRead, B: ChunkRead, C: ChunkCombinator> {
     a: A,
     b: B,
 }
-pub struct BitAddress {
-    chunk_index: usize,
-    index_in_chunk: usize, // invariant: index_in_chunk < Chunk::BITS
-}
+
+/// Iterator over chunks with indices in range `0..r.combine_empty_chunks_start()`
 #[derive(Clone, Debug)]
 pub struct ChunkIter<R> {
     r: R,
     chunk_index_range: Range<usize>,
 }
+
 /// Iterates over some ChunkRead type, emitting indexes of set bits in ascending order.
 #[derive(Clone)]
 pub struct BitIndexIter<R: ChunkRead> {
     chunk_iter: ChunkIter<R>,
     cached_chunk: Chunk,
 }
+
+/// Newtype wrapper around some ChunkRead type, giving set-like interpretations of logical comparison operators such as {==, <, >}.
+/// a == b iff. a and b contain the same set bits.
+/// a < b iff. a is a subset of b.
+/// Note that the ordering on sets is partial; there is no ordering when the two sets have a non-empty symmetric difference.
 #[derive(Debug, Copy, Clone)]
 pub struct SetCmp<A: ChunkRead>(pub A);
+
+struct BitAddress {
+    chunk_index: usize,
+    index_in_chunk: usize, // invariant: index_in_chunk < Chunk::BITS
+}
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+impl Default for Chunk {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
 impl<A: ChunkRead, B: ChunkRead> PartialEq<SetCmp<B>> for SetCmp<A> {
     fn eq(&self, other: &SetCmp<B>) -> bool {
         combinators::SymmetricDifference::combine(&self.0, &other.0).is_empty()
@@ -338,26 +392,6 @@ impl ChunkOwn for Vec<Chunk> {
     fn from_chunk_iter<I: IntoIterator<Item = Chunk>>(into_iter: I) -> Self {
         into_iter.into_iter().collect()
     }
-    fn from_bit_iter<I: IntoIterator<Item = bool>>(into_iter: I) -> Self {
-        let mut vec: Vec<Chunk> = Default::default();
-        let mut chunk = Chunk::EMPTY;
-        let mut bit_index = 0;
-        for b in into_iter {
-            if bit_index == Chunk::BITS {
-                vec.push(chunk);
-                bit_index = 0;
-                chunk = Chunk::EMPTY;
-            }
-            if b {
-                chunk.insert_bit(bit_index);
-            }
-            bit_index += 1;
-        }
-        if !chunk.is_empty() {
-            vec.push(chunk)
-        }
-        vec
-    }
 }
 impl Debug for Chunk {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -499,5 +533,22 @@ mod tests {
         assert!(!(SetCmp(&a) <= SetCmp(&c)));
         assert!(!(SetCmp(&a) >= SetCmp(&c)));
         assert!(a.set_cmp().partial_cmp(&c.set_cmp()).is_none());
+    }
+
+    #[test]
+    pub fn bit_iter() {
+        let t = std::iter::repeat(true);
+        let f = std::iter::repeat(false);
+
+        let a = &[Chunk(0b_01110000_01100111)] as &[_];
+        let iter = t
+            .clone()
+            .take(3)
+            .chain(f.clone().take(2))
+            .chain(t.clone().take(2))
+            .chain(f.clone().take(5))
+            .chain(t.clone().take(3));
+        let b = BitSet::from_bit_iter(iter);
+        assert_eq!(SetCmp(a), SetCmp(&b));
     }
 }
