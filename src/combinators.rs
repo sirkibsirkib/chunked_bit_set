@@ -17,32 +17,32 @@ pub enum Difference {}
 pub enum Intersection {}
 
 impl ChunkCombinator for Union {
-    fn combine_chunks_len<A: ChunkRead, B: ChunkRead>(a: &A, b: &B) -> usize {
-        a.chunks_len().max(b.chunks_len())
+    fn combine_empty_chunks_start<A: ChunkRead, B: ChunkRead>(a: &A, b: &B) -> usize {
+        a.empty_chunks_start().max(b.empty_chunks_start())
     }
     fn combine_chunk(a: Chunk, b: Chunk) -> Chunk {
         Chunk(a.0 | b.0)
     }
 }
 impl ChunkCombinator for SymmetricDifference {
-    fn combine_chunks_len<A: ChunkRead, B: ChunkRead>(a: &A, b: &B) -> usize {
-        a.chunks_len().max(b.chunks_len())
+    fn combine_empty_chunks_start<A: ChunkRead, B: ChunkRead>(a: &A, b: &B) -> usize {
+        a.empty_chunks_start().max(b.empty_chunks_start())
     }
     fn combine_chunk(a: Chunk, b: Chunk) -> Chunk {
         Chunk(a.0 ^ b.0)
     }
 }
 impl ChunkCombinator for Difference {
-    fn combine_chunks_len<A: ChunkRead, B: ChunkRead>(a: &A, _b: &B) -> usize {
-        a.chunks_len()
+    fn combine_empty_chunks_start<A: ChunkRead, B: ChunkRead>(a: &A, _b: &B) -> usize {
+        a.empty_chunks_start()
     }
     fn combine_chunk(a: Chunk, b: Chunk) -> Chunk {
         Chunk(a.0 & !b.0)
     }
 }
 impl ChunkCombinator for Intersection {
-    fn combine_chunks_len<A: ChunkRead, B: ChunkRead>(a: &A, b: &B) -> usize {
-        a.chunks_len().min(b.chunks_len())
+    fn combine_empty_chunks_start<A: ChunkRead, B: ChunkRead>(a: &A, b: &B) -> usize {
+        a.empty_chunks_start().min(b.empty_chunks_start())
     }
     fn combine_chunk(a: Chunk, b: Chunk) -> Chunk {
         Chunk(a.0 & b.0)
