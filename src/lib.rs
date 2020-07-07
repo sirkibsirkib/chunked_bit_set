@@ -25,7 +25,9 @@ pub trait ChunkOwn: ChunkWrite + Default {
     /// Constructs Self from an interator over indices of set bits in no particular ordering.
     fn from_set_bits_iter<I: IntoIterator<Item = usize>>(into_iter: I) -> Self {
         let mut me = Self::default();
-        me.extend_from_set_bits_iter(into_iter);
+        for bit_index in into_iter {
+            me.insert_bit(bit_index);
+        }
         me
     }
 
@@ -62,11 +64,6 @@ pub trait ChunkOwn: ChunkWrite + Default {
             iter: into_iter.into_iter(),
         })
     }
-    fn extend_from_set_bits_iter<I: IntoIterator<Item = usize>>(&mut self, into_iter: I) {
-        for bit_index in into_iter {
-            self.insert_bit(bit_index);
-        }
-    }
 }
 
 /// Same functionality as std::convert::{Into, From}, but combined,
@@ -84,38 +81,57 @@ pub type BitSet = Vec<Chunk>;
 /// Characterizes a structure that facilitates random read access of indexed chunks of indexed bits.
 /// Allows combinations with other `ChunkRead` types, comparison, querying, and iterating over chunks and set bits.
 pub trait ChunkRead: Sized + Clone {
-    fn empty_chunks_start(&self) -> usize; // promises that all chunks in range empty_chunks_start().. will be Chunk::EMPTY
+    /// return N such that self.read_chunk(M)==Chunk::EMPTY for M>=N.
+    /// Used to terminate iteration, so be careful not to return the wrong value.
+    fn empty_chunks_start(&self) -> usize;
+
+    /// Copy the chunk chunk with the given index
     fn read_chunk(&self, chunk_index: usize) -> Chunk;
 
+    /// Returns a SetCmp wrapped version of &Self
     fn set_cmp(&self) -> SetCmp<&Self> {
         SetCmp(self)
     }
 
+    /// Tests the bit with the given index, returning it as a boolean.
+    /// Correct iff self.read_bit(N) == self.read_chunk(N/Chunk::Bits).read_bit(N%Chunk::Bits)
     fn read_bit(&self, bit_index: usize) -> bool {
         let BitAddress { chunk_index, index_in_chunk } = BitAddress::from_bit_index(bit_index);
         let chunk = self.read_chunk(chunk_index);
         chunk.read_bit(index_in_chunk)
     }
+
+    /// Returns an iterator over indices in 0.. for which self.read_bit() is true
     fn iter_set_bits(&self) -> BitIndexIter<&Self> {
         let mut chunk_iter = self.chunk_iter();
         let cached_chunk = chunk_iter.next().unwrap_or(Chunk::EMPTY);
         BitIndexIter { chunk_iter, cached_chunk }
     }
+
+    /// Returns the number of indices N for which self.test_bit()==true
     fn count_set_bits(&self) -> usize {
         self.chunk_iter().map(|chunk| chunk.count_set_bits() as usize).sum()
     }
+
+    /// Returns a new readable type given a combinator.
     fn combine_with<'a, 'b, C: ChunkCombinator, B: ChunkRead>(
         &'a self,
         other: &'b B,
     ) -> ChunkReadCombined<&'a Self, &'b B, C> {
         ChunkReadCombined::new(self, other)
     }
+
+    /// Collects the chunks of self into a new owned type
     fn to_owned<T: ChunkOwn>(&self) -> T {
         T::from_chunk_iter(self.chunk_iter())
     }
+
+    /// Returns true iff no bits are set
     fn is_empty(&self) -> bool {
         self.chunk_iter().all(Chunk::is_empty)
     }
+
+    /// Returns an iterator over all chunks that may be nonempty with chunk indices [0, 1, 2, ...]
     fn chunk_iter(&self) -> ChunkIter<&Self> {
         ChunkIter { chunk_index_range: 0..self.empty_chunks_start(), r: self }
     }
@@ -123,9 +139,17 @@ pub trait ChunkRead: Sized + Clone {
 
 /// Characterizes a structure that facilitates random write access of indexed chunks of indexed bits.
 pub trait ChunkWrite: Sized + ChunkRead {
+    /// Sets the bit at the given index. Returns true iff the bit was not already set
     fn insert_bit(&mut self, bit_index: usize) -> bool;
+
+    /// Unsets the bit at the given index. Returns true iff the bit was set
     fn remove_bit(&mut self, bit_index: usize) -> bool;
+
+    /// Unsets all bits. Henceforth, all chunks are Chunk::EMPTY
     fn clear_chunks(&mut self);
+
+    /// Unsets an arbitrary set bit and returns its index if one exists.
+    /// Returns None iff self.is_empty() beforehand
     fn pop_set_bit(&mut self) -> Option<usize> {
         let bit_index = self.iter_set_bits().next()?;
         self.remove_bit(bit_index);
@@ -137,12 +161,16 @@ pub trait ChunkWrite: Sized + ChunkRead {
 /// Default implementation assumes that functions are pure,
 /// and that the index of a bit is independent of its treatment.
 pub trait ChunkCombinator {
-    fn combine_empty_chunks_start<A: ChunkRead, B: ChunkRead>(a: &A, b: &B) -> usize;
+    /// Given two chunks, return the combined chunk. Correct iff the treatment of a bit is independent of its index.
     fn combine_chunk(a: Chunk, b: Chunk) -> Chunk;
+    /// Given two bits, return their combined bit value
     fn combine_bit(a: bool, b: bool) -> bool {
         let a = if a { Chunk::FULL } else { Chunk::EMPTY };
         let b = if b { Chunk::FULL } else { Chunk::EMPTY };
         !Self::combine_chunk(a, b).is_empty()
+    }
+    fn combine_empty_chunks_start<A: ChunkRead, B: ChunkRead>(a: &A, b: &B) -> usize {
+        a.empty_chunks_start().max(b.empty_chunks_start())
     }
     fn combine<A: ChunkRead, B: ChunkRead>(a: A, b: B) -> ChunkReadCombined<A, B, Self>
     where

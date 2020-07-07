@@ -17,17 +17,11 @@ pub enum Difference {}
 pub enum Intersection {}
 
 impl ChunkCombinator for Union {
-    fn combine_empty_chunks_start<A: ChunkRead, B: ChunkRead>(a: &A, b: &B) -> usize {
-        a.empty_chunks_start().max(b.empty_chunks_start())
-    }
     fn combine_chunk(a: Chunk, b: Chunk) -> Chunk {
         Chunk(a.0 | b.0)
     }
 }
 impl ChunkCombinator for SymmetricDifference {
-    fn combine_empty_chunks_start<A: ChunkRead, B: ChunkRead>(a: &A, b: &B) -> usize {
-        a.empty_chunks_start().max(b.empty_chunks_start())
-    }
     fn combine_chunk(a: Chunk, b: Chunk) -> Chunk {
         Chunk(a.0 ^ b.0)
     }
